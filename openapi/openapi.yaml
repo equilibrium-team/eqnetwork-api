@@ -1,0 +1,310 @@
+openapi: 3.0.3
+info:
+  title: EQ Network API
+  description: Official public API specification for EQ Network video ingestion, channel management, and review/approval workflows.
+  version: 2.0.0
+  contact:
+    name: Equilibrium Team
+    url: https://eqnetwork.com
+servers:
+  - url: https://eqnetwork.com/sd
+    description: Production Cluster
+  - url: https://stage.eqnetwork.com/sd
+    description: Staging Cluster
+
+paths:
+  /CreateSession.aspx:
+    post:
+      summary: Authenticate creator and establish session
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - UserName
+                - Password
+              properties:
+                UserName:
+                  type: string
+                  description: Account username or verified email
+                Password:
+                  type: string
+                  description: Account password
+      responses:
+        '200':
+          description: Session created successfully
+          content:
+            text/xml:
+              schema:
+                type: string
+                example: "<CreateSession><SessionGuid>356ca5a6-fff6-45fb-8780-1fe09c615028</SessionGuid><User UserId='3574' Verified='True'/></CreateSession>"
+
+  /Api2.0/Session_Check.aspx:
+    post:
+      summary: Validate and keep session active
+      operationId: sessionCheck
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - SessionGuid
+              properties:
+                SessionGuid:
+                  type: string
+                Client:
+                  type: string
+                  default: Web
+      responses:
+        '200':
+          description: Session status returned
+          content:
+            text/xml:
+              schema:
+                type: string
+
+  /Api2.0/Upload2_Begin.aspx:
+    post:
+      summary: Initialize chunked video upload
+      operationId: uploadBegin
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - SessionGuid
+                - Name
+                - OriginalFilepath
+                - FileSize
+                - PreferredChunkSize
+                - NumberOfChunks
+                - DeviceIdentifier
+              properties:
+                SessionGuid:
+                  type: string
+                Name:
+                  type: string
+                OriginalFilepath:
+                  type: string
+                FileSize:
+                  type: integer
+                PreferredChunkSize:
+                  type: integer
+                  default: 2097152
+                NumberOfChunks:
+                  type: integer
+                DeviceIdentifier:
+                  type: string
+      responses:
+        '200':
+          description: Upload session initialized with UploadId
+          content:
+            text/xml:
+              schema:
+                type: string
+
+  /Api2.0/Upload2_UploadChunk.aspx:
+    post:
+      summary: Upload a binary chunk of video data
+      operationId: uploadChunk
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - SessionGuid
+                - UploadId
+                - ChunkOffset
+                - ChunkSize
+                - Data
+              properties:
+                SessionGuid:
+                  type: string
+                UploadId:
+                  type: string
+                ChunkOffset:
+                  type: integer
+                ChunkSize:
+                  type: integer
+                Data:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Chunk uploaded successfully
+          content:
+            text/xml:
+              schema:
+                type: string
+
+  /Api2.0/Upload2_Complete.aspx:
+    post:
+      summary: Complete chunked upload and assemble file
+      operationId: uploadComplete
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - SessionGuid
+                - UploadId
+              properties:
+                SessionGuid:
+                  type: string
+                UploadId:
+                  type: string
+      responses:
+        '200':
+          description: Upload assembled and ready for content file assignment
+          content:
+            text/xml:
+              schema:
+                type: string
+
+  /Api2.0/Upload2_CreateContentFile.aspx:
+    post:
+      summary: Create video content file in specified channel
+      operationId: createContentFile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - SessionGuid
+                - UploadId
+                - CollectionId
+                - Name
+                - Categories
+              properties:
+                SessionGuid:
+                  type: string
+                UploadId:
+                  type: string
+                CollectionId:
+                  type: string
+                Name:
+                  type: string
+                Description:
+                  type: string
+                Categories:
+                  type: string
+                Keywords:
+                  type: string
+                Thumbnail:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: ContentFile created with ContentFileId
+          content:
+            text/xml:
+              schema:
+                type: string
+
+  /Api2.0/ContentFile_GetNode.aspx:
+    post:
+      summary: Fetch video metadata, transcode progress, and approval status
+      operationId: getContentFile
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - SessionGuid
+                - ContentFileId
+              properties:
+                SessionGuid:
+                  type: string
+                ContentFileId:
+                  type: string
+      responses:
+        '200':
+          description: ContentFile details
+          content:
+            text/xml:
+              schema:
+                type: string
+
+  /Api2.0/Collection_Create.aspx:
+    post:
+      summary: Create new channel (collection)
+      operationId: createCollection
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - SessionGuid
+                - Name
+                - Categories
+              properties:
+                SessionGuid:
+                  type: string
+                Name:
+                  type: string
+                Description:
+                  type: string
+                Categories:
+                  type: string
+                Private:
+                  type: string
+                  enum: ['Y', 'N']
+                  default: 'N'
+                Icon:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Channel created with CollectionId
+          content:
+            text/xml:
+              schema:
+                type: string
+
+  /Api2.0/User_ListCollections.aspx:
+    post:
+      summary: List channels for user
+      operationId: listCollections
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - SessionGuid
+              properties:
+                SessionGuid:
+                  type: string
+                Client:
+                  type: string
+                User_CollectionTypeId:
+                  type: string
+                IncludeEmpty:
+                  type: string
+                OrderBy:
+                  type: string
+      responses:
+        '200':
+          description: List of collections
+          content:
+            text/xml:
+              schema:
+                type: string
