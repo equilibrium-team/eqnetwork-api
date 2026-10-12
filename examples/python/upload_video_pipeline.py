@@ -15,18 +15,19 @@ import sys
 import math
 import time
 import uuid
+import argparse
 import xml.etree.ElementTree as ET
 import requests
 
-BASE_URL = os.getenv("EQ_API_URL", "https://eqnetwork.com/sd")
-USERNAME = os.getenv("EQ_USERNAME", "test222")
-PASSWORD = os.getenv("EQ_PASSWORD", "fEkcow-majdyh-diggi5")
+DEFAULT_BASE_URL = os.getenv("EQ_API_URL", "https://eqnetwork.com/sd")
+DEFAULT_USERNAME = os.getenv("EQ_USERNAME", "test222")
+DEFAULT_PASSWORD = os.getenv("EQ_PASSWORD", "fEkcow-majdyh-diggi5")
 DEFAULT_CHUNK_SIZE = 2 * 1024 * 1024  # 2MB chunks
 
 
-def create_session(username, password):
+def create_session(base_url, username, password):
     """Authenticate and extract SessionGuid from XML response."""
-    url = f"{BASE_URL}/CreateSession.aspx"
+    url = f"{base_url}/CreateSession.aspx"
     payload = {"UserName": username, "Password": password}
     response = requests.post(url, data=payload, timeout=30)
     response.raise_for_status()
@@ -46,14 +47,14 @@ def create_session(username, password):
     return session_guid
 
 
-def get_or_create_channel(session_guid, channel_name="Automated Ingest Channel"):
+def get_or_create_channel(base_url, session_guid, channel_name="Automated Ingest Channel"):
     """Finds existing channel or creates a new one."""
-    # List channels
-    list_url = f"{BASE_URL}/Api2.0/User_ListCollections.aspx"
+    # List channels (User_CollectionTypeId 1=owned, 2=followed, 1,2=both)
+    list_url = f"{base_url}/Api2.0/User_ListCollections.aspx"
     payload = {
         "SessionGuid": session_guid,
         "Client": "PythonScript",
-        "User_CollectionTypeId": "2",
+        "User_CollectionTypeId": "1,2",
         "IncludeEmpty": "y",
         "IncludeContentFiles": "N",
         "Start": "1",
@@ -71,7 +72,7 @@ def get_or_create_channel(session_guid, channel_name="Automated Ingest Channel")
                 return col_id
 
     # Create channel if not found
-    create_url = f"{BASE_URL}/Api2.0/Collection_Create.aspx"
+    create_url = f"{base_url}/Api2.0/Collection_Create.aspx"
     create_payload = {
         "SessionGuid": session_guid,
         "Name": channel_name,
@@ -85,13 +86,19 @@ def get_or_create_channel(session_guid, channel_name="Automated Ingest Channel")
     create_root = ET.fromstring(create_res.text)
     new_id = create_root.findtext("CollectionId")
     if not new_id:
+        # Check if error indicates it already exists under different query
+        err = create_root.findtext("Error") or ""
+        if "already have a collection" in err:
+            for col in collections:
+                if col.attrib.get("Name", "").lower() == channel_name.lower():
+                    return col.attrib.get("CollectionId")
         raise RuntimeError(f"Channel creation failed: {create_res.text}")
 
     print(f"✓ Created new channel '{channel_name}' (ID: {new_id})")
     return new_id
 
 
-def upload_video_file(session_guid, file_path, collection_id, video_title=None, category="Technology"):
+def upload_video_file(base_url, session_guid, file_path, collection_id, video_title=None, description=None, category="Technology", chunk_size=DEFAULT_CHUNK_SIZE):
     """Executes full chunked upload pipeline for a local video."""
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -99,19 +106,20 @@ def upload_video_file(session_guid, file_path, collection_id, video_title=None, 
     file_size = os.path.getsize(file_path)
     file_name = os.path.basename(file_path)
     title = video_title or file_name
+    desc = description or f"Uploaded automatically via EQ Network Ingest Pipeline at {time.ctime()}"
     device_id = str(uuid.uuid4())
-    total_chunks = max(1, math.ceil(file_size / DEFAULT_CHUNK_SIZE))
+    total_chunks = max(1, math.ceil(file_size / chunk_size))
 
     print(f"\n--- Starting Video Ingestion: {file_name} ({file_size / 1024 / 1024:.2f} MB, {total_chunks} chunks) ---")
 
     # Step 1: Upload2_Begin
-    begin_url = f"{BASE_URL}/Api2.0/Upload2_Begin.aspx"
+    begin_url = f"{base_url}/Api2.0/Upload2_Begin.aspx"
     begin_data = {
         "SessionGuid": session_guid,
         "Name": file_name,
         "OriginalFilepath": file_name,
         "FileSize": file_size,
-        "PreferredChunkSize": DEFAULT_CHUNK_SIZE,
+        "PreferredChunkSize": chunk_size,
         "NumberOfChunks": total_chunks,
         "DeviceIdentifier": device_id,
     }
@@ -126,11 +134,11 @@ def upload_video_file(session_guid, file_path, collection_id, video_title=None, 
     print(f"✓ Upload session allocated (UploadId: {upload_id})")
 
     # Step 2: Upload2_UploadChunk
-    chunk_url = f"{BASE_URL}/Api2.0/Upload2_UploadChunk.aspx"
+    chunk_url = f"{base_url}/Api2.0/Upload2_UploadChunk.aspx"
     with open(file_path, "rb") as f:
         for chunk_idx in range(total_chunks):
-            offset = chunk_idx * DEFAULT_CHUNK_SIZE
-            chunk_data = f.read(DEFAULT_CHUNK_SIZE)
+            offset = chunk_idx * chunk_size
+            chunk_data = f.read(chunk_size)
             actual_size = len(chunk_data)
 
             files = {"Data": ("blob", chunk_data, "application/octet-stream")}
@@ -147,19 +155,19 @@ def upload_video_file(session_guid, file_path, collection_id, video_title=None, 
             print(f"  • Uploaded chunk {chunk_idx + 1}/{total_chunks} ({progress:.1f}%)")
 
     # Step 3: Upload2_Complete
-    complete_url = f"{BASE_URL}/Api2.0/Upload2_Complete.aspx"
+    complete_url = f"{base_url}/Api2.0/Upload2_Complete.aspx"
     complete_res = requests.post(complete_url, data={"SessionGuid": session_guid, "UploadId": upload_id}, timeout=60)
     complete_res.raise_for_status()
     print("✓ Chunks assembled successfully on media server")
 
     # Step 4: Upload2_CreateContentFile
-    create_cf_url = f"{BASE_URL}/Api2.0/Upload2_CreateContentFile.aspx"
+    create_cf_url = f"{base_url}/Api2.0/Upload2_CreateContentFile.aspx"
     create_cf_data = {
         "SessionGuid": session_guid,
         "UploadId": upload_id,
         "CollectionId": collection_id,
         "Name": title,
-        "Description": f"Uploaded automatically via EQ Network Ingest Pipeline at {time.ctime()}",
+        "Description": desc,
         "Categories": category,
         "Keywords": "automated,pipeline,api",
     }
@@ -174,8 +182,8 @@ def upload_video_file(session_guid, file_path, collection_id, video_title=None, 
 
     # Step 5: Poll ContentFile_GetNode for encoding / review status
     print("\n--- Polling Transcode and Review Status ---")
-    node_url = f"{BASE_URL}/Api2.0/ContentFile_GetNode.aspx"
-    for attempt in range(10):
+    node_url = f"{base_url}/Api2.0/ContentFile_GetNode.aspx"
+    for attempt in range(12):
         time.sleep(3)
         node_res = requests.post(node_url, data={"SessionGuid": session_guid, "ContentFileId": content_file_id}, timeout=30)
         if node_res.ok:
@@ -184,19 +192,56 @@ def upload_video_file(session_guid, file_path, collection_id, video_title=None, 
             if cf_node is not None:
                 active = cf_node.attrib.get("Active", "")
                 mux_key = cf_node.attrib.get("CurrentMuxKey", "")
-                view_url = cf_node.attrib.get("OriginalUrl", "")
                 print(f"  • Attempt {attempt + 1}: Active={active}, MuxKey={mux_key or 'Processing...'}")
                 if active == "True":
                     print(f"\n🎉 Video is READY & APPROVED for playback!")
-                    print(f"   Watch URL: https://eqnetwork.com/watch?v={content_file_id}")
+                    print(f"   Watch URL: {base_url.replace('/sd', '')}/watch?v={content_file_id}")
                     return content_file_id
 
     print(f"✓ Video registered (ContentFileId: {content_file_id}), background encoding underway.")
     return content_file_id
 
 
+def main():
+    parser = argparse.ArgumentParser(description="EQ Network Automated Video Upload Pipeline")
+    parser.add_argument("--file", "-f", help="Path to local video file to upload")
+    parser.add_argument("--title", "-t", help="Video Title")
+    parser.add_argument("--description", "-d", help="Video Description")
+    parser.add_argument("--category", "-c", default="Technology", help="Category (e.g. Technology, Entertainment)")
+    parser.add_argument("--channel", default="API Automation Ingest", help="Destination Channel Name or ID")
+    parser.add_argument("--username", "-u", default=DEFAULT_USERNAME, help="EQ Network username")
+    parser.add_argument("--password", "-p", default=DEFAULT_PASSWORD, help="EQ Network password")
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Base API URL")
+    parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE, help="Chunk size in bytes")
+
+    args = parser.parse_args()
+
+    base_url = args.base_url.rstrip("/")
+    if not base_url.endswith("/sd"):
+        base_url = f"{base_url}/sd"
+
+    session = create_session(base_url, args.username, args.password)
+
+    if args.channel.isdigit():
+        channel_id = args.channel
+    else:
+        channel_id = get_or_create_channel(base_url, session, args.channel)
+
+    if args.file:
+        upload_video_file(
+            base_url=base_url,
+            session_guid=session,
+            file_path=args.file,
+            collection_id=channel_id,
+            video_title=args.title,
+            description=args.description,
+            category=args.category,
+            chunk_size=args.chunk_size,
+        )
+    else:
+        print(f"\nReady to upload videos into channel ID: {channel_id}")
+        print("Run with --file <path_to_video.mp4> to perform automated upload.")
+
+
 if __name__ == "__main__":
-    session = create_session(USERNAME, PASSWORD)
-    channel = get_or_create_channel(session, "API Automation Ingest")
-    print(f"\nReady to upload videos into channel: {channel}")
-    print("Usage in your scripts: upload_video_file(session, 'my_video.mp4', channel)")
+    main()
